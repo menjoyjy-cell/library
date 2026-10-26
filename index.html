@@ -55,32 +55,57 @@ async function api(action, payload = {}){
     headers: {'Content-Type': 'text/plain;charset=utf-8'},
     body: JSON.stringify({action, idToken: token, ...payload})
   });
-  const j = await res.json();
+  let j;
+  try { j = await res.json(); }
+  catch (_) { throw new Error('เชื่อมต่อ Apps Script ไม่ได้ — ตรวจว่า Deploy เป็นเว็บแอป และสิทธิ์เข้าถึงเป็น "ทุกคน"'); }
   if (!j.ok) {
-    if (String(j.error).startsWith('TOKEN_INVALID')) { relogin(); throw new Error('กำลังเข้าสู่ระบบใหม่...'); }
+    if (String(j.error).startsWith('TOKEN_INVALID')) {
+      if (relogin()) throw new Error('กำลังเข้าสู่ระบบใหม่...');
+      throw new Error('ยืนยันตัวตนไม่ผ่าน: ' + String(j.error).replace('TOKEN_INVALID: ','') + ' (ตรวจค่า LINE_CHANNEL_ID ใน Apps Script)');
+    }
     throw new Error(j.error);
   }
   return j.data;
 }
 
+/* กันวนลูปล็อกอิน: ลองใหม่ได้ไม่เกิน 2 ครั้งต่อการเปิดหน้า */
+const LOGIN_KEY = 'phnrru_login_try';
+function loginTries(){ try { return Number(sessionStorage.getItem(LOGIN_KEY) || 0); } catch (_) { return 0; } }
+function setLoginTries(n){ try { sessionStorage.setItem(LOGIN_KEY, String(n)); } catch (_) {} }
+
 function relogin(){
+  const n = loginTries();
+  if (n >= 2) return false;
+  setLoginTries(n + 1);
   if (liff.isLoggedIn()) liff.logout();
-  liff.login({redirectUri: location.href});
+  liff.login();
+  return true;
 }
 
 async function start(){
   try {
+    msg('กำลังเชื่อมต่อ LINE...');
     await liff.init({liffId: LIFF_ID, withLoginOnExternalBrowser: true});
-    if (!liff.isLoggedIn()) { liff.login({redirectUri: location.href}); return; }
+    if (!liff.isLoggedIn()) {
+      if (relogin()) return;
+      throw new Error('เข้าสู่ระบบ LINE ไม่สำเร็จ กรุณาปิดแล้วเปิดใหม่ผ่านแอป LINE');
+    }
 
     // ID token หมดอายุ (~1 ชม.) ต้อง login ใหม่ ไม่งั้น verify ฝั่ง server ไม่ผ่าน
     const decoded = liff.getDecodedIDToken();
-    if (!decoded || decoded.exp * 1000 < Date.now() + 60000) { relogin(); return; }
+    if (!decoded || decoded.exp * 1000 < Date.now() + 60000) {
+      if (relogin()) return;
+      throw new Error('ไม่ได้รับ ID Token — ตรวจว่า LIFF เปิด scope "openid" แล้ว');
+    }
 
     token = liff.getIDToken();
-    if (!token) throw new Error('ไม่ได้รับ ID Token — ตรวจว่าเปิด scope "openid" ในการตั้งค่า LIFF');
+    if (!token) throw new Error('ไม่ได้รับ ID Token — ตรวจว่า LIFF เปิด scope "openid" แล้ว');
     await refresh();
-  } catch (e) { msg(e.message || String(e), true); }
+    setLoginTries(0);
+  } catch (e) {
+    const code = e && e.code ? ` [${e.code}]` : '';
+    msg((e.message || String(e)) + code, true);
+  }
 }
 
 async function refresh(){
