@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PH-NRRU Library</title>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Prompt:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--green:#06C755;--pink:#FF2D87;--lime:#C8FF1A;--ink:#1D1B3A;--bg:#FFF4F9;--muted:#6B6785}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);font-family:Prompt,sans-serif;background-color:var(--bg);background-image:radial-gradient(#FFD3E6 2px,transparent 2.5px);background-size:22px 22px}
+.wrap{max-width:620px;margin:auto;padding:20px 16px 40px}
+.hero{position:relative;overflow:hidden;background:var(--green);color:#fff;padding:26px 22px 28px;border-radius:30px;border:4px solid var(--ink);box-shadow:0 7px 0 var(--ink)}
+.hero:before{content:"";position:absolute;right:-50px;top:-60px;width:210px;height:210px;border-radius:50%;background:var(--pink)}
+.hero>*{position:relative;z-index:1}
+.hero h1{margin:0;font-size:28px;font-weight:800;text-shadow:2px 2px 0 var(--ink)}
+.hero p{margin:14px 0 0;max-width:85%;font-weight:500;font-size:14px}
+.card{background:#fff;border:3px solid var(--ink);border-radius:24px;padding:18px;margin:18px 0;box-shadow:0 5px 0 var(--ink)}
+#status{background:var(--lime);font-weight:600;font-size:15px}
+#status.error{background:var(--pink);color:#fff}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.meta{font-size:13px;color:var(--muted);margin:10px 0;font-weight:500}
+button{background:var(--pink);color:#fff;border:3px solid var(--ink);border-radius:16px;padding:12px 18px;font:700 15px Prompt,sans-serif;cursor:pointer;box-shadow:0 5px 0 var(--ink);width:100%}
+button:active{transform:translateY(4px);box-shadow:0 1px 0 var(--ink)}
+button:disabled{opacity:.5;cursor:not-allowed}
+input{padding:13px 14px;border:3px solid var(--ink);border-radius:16px;font:500 16px Prompt,sans-serif;width:100%;margin:8px 0 14px}
+label{font-weight:600}
+.muted{color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="hero"><h1>📚 PH-NRRU Library</h1><p>ตรวจสอบรายการยืมและต่ออายุเล่มวิจัยผ่าน LINE</p></div>
+  <div id="status" class="card">กำลังเริ่มต้นระบบ...</div>
+  <div id="content"></div>
+</main>
+
+<script>
+/* ===== ตั้งค่า 2 บรรทัดนี้ ===== */
+const LIFF_ID = '2012225621-LKNYtBNF';
+const API_URL = 'https://script.google.com/macros/s/AKfycbym_tfW317eDx6zDRxALK1qtwBDS5vMQlrxiY1hNbje4Rrh2CZRsEBsXuEQxIvrwyzfUg/exec';
+
+let token = '';
+const statusEl = document.getElementById('status');
+const content  = document.getElementById('content');
+
+function msg(t, err=false){ statusEl.textContent = t; statusEl.className = 'card' + (err ? ' error' : ''); }
+function safe(t){ return String(t ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ใช้ text/plain เพื่อไม่ให้เกิด CORS preflight กับ Apps Script
+async function api(action, payload = {}){
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'},
+    body: JSON.stringify({action, idToken: token, ...payload})
+  });
+  const j = await res.json();
+  if (!j.ok) {
+    if (String(j.error).startsWith('TOKEN_INVALID')) { relogin(); throw new Error('กำลังเข้าสู่ระบบใหม่...'); }
+    throw new Error(j.error);
+  }
+  return j.data;
+}
+
+function relogin(){
+  if (liff.isLoggedIn()) liff.logout();
+  liff.login({redirectUri: location.href});
+}
+
+async function start(){
+  try {
+    await liff.init({liffId: LIFF_ID, withLoginOnExternalBrowser: true});
+    if (!liff.isLoggedIn()) { liff.login({redirectUri: location.href}); return; }
+
+    // ID token หมดอายุ (~1 ชม.) ต้อง login ใหม่ ไม่งั้น verify ฝั่ง server ไม่ผ่าน
+    const decoded = liff.getDecodedIDToken();
+    if (!decoded || decoded.exp * 1000 < Date.now() + 60000) { relogin(); return; }
+
+    token = liff.getIDToken();
+    if (!token) throw new Error('ไม่ได้รับ ID Token — ตรวจว่าเปิด scope "openid" ในการตั้งค่า LIFF');
+    await refresh();
+  } catch (e) { msg(e.message || String(e), true); }
+}
+
+async function refresh(){
+  try {
+    msg('กำลังตรวจสอบข้อมูล...');
+    const data = await api('myLoans');
+    content.innerHTML = '';
+
+    if (data.status === 'ยังไม่เชื่อมบัญชี') {
+      msg('เชื่อมบัญชีครั้งแรกเพื่อดูรายการยืม');
+      content.innerHTML = `<div class="card"><label>รหัสนักศึกษา</label>
+        <input id="sid" placeholder="กรอกรหัสนักศึกษา" inputmode="numeric">
+        <button id="bindBtn" onclick="bind()">ส่งคำขอเชื่อมบัญชี</button>
+        <p class="muted">เจ้าหน้าที่จะตรวจสอบและอนุมัติการเชื่อมบัญชีครั้งแรก</p></div>`;
+      return;
+    }
+    if (data.status !== 'อนุมัติ') {
+      msg('สถานะ: ' + data.status + ' — กรุณารอเจ้าหน้าที่อนุมัติ');
+      content.innerHTML = '<div class="card"><button onclick="refresh()">ตรวจสอบอีกครั้ง</button></div>';
+      return;
+    }
+
+    msg('สวัสดี ' + (data.name || '') + ' • บัญชีได้รับอนุมัติแล้ว');
+    if (!data.loans.length) { content.innerHTML = '<div class="card">ไม่มีรายการยืมค้างอยู่</div>'; return; }
+
+    content.innerHTML = data.loans.map(l => `
+      <div class="card">
+        <div class="row"><strong>${safe(l.bookId)}</strong><span>${l.overdue ? '🔴 เกินกำหนด' : '🟢 กำลังยืม'}</span></div>
+        <div style="margin:10px 0">${safe(l.title)}</div>
+        <div class="meta">กำหนดคืน: ${safe(l.dueDate)} · ต่ออายุแล้ว ${Number(l.renewCount) || 0} ครั้ง</div>
+        <button data-id="${safe(l.transactionId)}" onclick="renew(this)">ต่ออายุ +7 วัน</button>
+      </div>`).join('');
+  } catch (e) { msg(e.message || String(e), true); }
+}
+
+async function bind(){
+  const sid = document.getElementById('sid').value.trim();
+  if (!sid) return msg('กรุณากรอกรหัสนักศึกษา', true);
+  const btn = document.getElementById('bindBtn'); btn.disabled = true;
+  try { msg('กำลังส่งคำขอ...'); await api('bind', {studentId: sid}); await refresh(); }
+  catch (e) { msg(e.message || String(e), true); btn.disabled = false; }
+}
+
+async function renew(btn){
+  if (!confirm('ยืนยันต่ออายุเล่มนี้อีก 7 วัน? หากเกินกำหนดจะนับจากวันนี้')) return;
+  btn.disabled = true; btn.textContent = 'กำลังต่ออายุ...';
+  try {
+    const result = await api('renew', {transactionId: btn.dataset.id});
+    alert(result.message);
+    await refresh();
+  } catch (e) { msg(e.message || String(e), true); btn.disabled = false; btn.textContent = 'ต่ออายุ +7 วัน'; }
+}
+
+start();
+</script>
+</body>
+</html>
