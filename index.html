@@ -27,6 +27,16 @@ button:disabled{opacity:.5;cursor:not-allowed}
 input{padding:13px 14px;border:3px solid var(--ink);border-radius:16px;font:500 16px Prompt,sans-serif;width:100%;margin:8px 0 14px}
 label{font-weight:600}
 .muted{color:var(--muted);font-size:13px}
+.btn-green{background:var(--green);color:var(--ink)}
+.btn-light{background:#fff;color:var(--ink)}
+.btn-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.btn-row button{padding:10px 12px;font-size:14px}
+.tabs{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0 0}
+.tabs button{padding:10px;font-size:14px;background:#fff;color:var(--ink)}
+.tabs button.on{background:var(--ink);color:#fff}
+.badge{display:inline-block;border:2px solid var(--ink);border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700}
+.b-wait{background:#FFF2BD}.b-ok{background:#DCFFE9}.b-no{background:#FFE0E9}
+.uid{font-family:monospace;font-size:13px;word-break:break-all;background:#f5f0f5;border-radius:10px;padding:10px;margin:10px 0}
 </style>
 </head>
 <body>
@@ -82,10 +92,25 @@ function relogin(){
   return true;
 }
 
+/* โหมดหน้า: นักศึกษา (ค่าเริ่มต้น) หรือ แอดมิน (?mode=admin) */
+const MODE_KEY = 'phnrru_mode';
+function readModeFromUrl(afterInit){
+  const p = new URLSearchParams(location.search);
+  let m = p.get('mode');
+  if (!m && p.get('liff.state')) m = new URLSearchParams(p.get('liff.state').replace(/^[^?]*\?/, '')).get('mode');
+  if (m) { setMode(m); return; }
+  // เปิดจากลิงก์ปกติ (ไม่มี mode) และไม่ได้กลับมาจากการล็อกอิน → โหมดนักศึกษา
+  if (afterInit && loginTries() === 0) setMode('student');
+}
+function getMode(){ try { return sessionStorage.getItem(MODE_KEY) || 'student'; } catch (_) { return 'student'; } }
+function setMode(m){ try { sessionStorage.setItem(MODE_KEY, m); } catch (_) {} }
+
 async function start(){
   try {
+    readModeFromUrl();
     msg('กำลังเชื่อมต่อ LINE...');
     await liff.init({liffId: LIFF_ID, withLoginOnExternalBrowser: true});
+    readModeFromUrl(true);
     if (!liff.isLoggedIn()) {
       if (relogin()) return;
       throw new Error('เข้าสู่ระบบ LINE ไม่สำเร็จ กรุณาปิดแล้วเปิดใหม่ผ่านแอป LINE');
@@ -100,7 +125,7 @@ async function start(){
 
     token = liff.getIDToken();
     if (!token) throw new Error('ไม่ได้รับ ID Token — ตรวจว่า LIFF เปิด scope "openid" แล้ว');
-    await refresh();
+    if (getMode() === 'admin') await refreshAdmin(); else await refresh();
     setLoginTries(0);
   } catch (e) {
     const code = e && e.code ? ` [${e.code}]` : '';
@@ -112,33 +137,120 @@ async function refresh(){
   try {
     msg('กำลังตรวจสอบข้อมูล...');
     const data = await api('myLoans');
-    content.innerHTML = '';
+    const adminCard = data.isAdmin
+      ? `<div class="card"><div class="row"><strong>🛡️ คุณเป็นแอดมิน</strong></div>
+           <button class="btn-green" style="margin-top:12px" onclick="goAdmin()">ไปหน้าอนุมัติบัญชี LINE</button></div>`
+      : '';
+    let html = '';
 
     if (data.status === 'ยังไม่เชื่อมบัญชี') {
       msg('เชื่อมบัญชีครั้งแรกเพื่อดูรายการยืม');
-      content.innerHTML = `<div class="card"><label>รหัสนักศึกษา</label>
+      html = `<div class="card"><label>รหัสนักศึกษา</label>
         <input id="sid" placeholder="กรอกรหัสนักศึกษา" inputmode="numeric">
         <button id="bindBtn" onclick="bind()">ส่งคำขอเชื่อมบัญชี</button>
         <p class="muted">เจ้าหน้าที่จะตรวจสอบและอนุมัติการเชื่อมบัญชีครั้งแรก</p></div>`;
-      return;
-    }
-    if (data.status !== 'อนุมัติ') {
+    } else if (data.status !== 'อนุมัติ') {
       msg('สถานะ: ' + data.status + ' — กรุณารอเจ้าหน้าที่อนุมัติ');
-      content.innerHTML = '<div class="card"><button onclick="refresh()">ตรวจสอบอีกครั้ง</button></div>';
+      html = '<div class="card"><button onclick="refresh()">ตรวจสอบอีกครั้ง</button></div>';
+    } else {
+      msg('สวัสดี ' + (data.name || '') + ' • บัญชีได้รับอนุมัติแล้ว');
+      html = !data.loans.length
+        ? '<div class="card">ไม่มีรายการยืมค้างอยู่</div>'
+        : data.loans.map(l => `
+          <div class="card">
+            <div class="row"><strong>${safe(l.bookId)}</strong><span>${l.overdue ? '🔴 เกินกำหนด' : '🟢 กำลังยืม'}</span></div>
+            <div style="margin:10px 0">${safe(l.title)}</div>
+            <div class="meta">กำหนดคืน: ${safe(l.dueDate)} · ต่ออายุแล้ว ${Number(l.renewCount) || 0} ครั้ง</div>
+            <button data-id="${safe(l.transactionId)}" onclick="renew(this)">ต่ออายุ +7 วัน</button>
+          </div>`).join('');
+    }
+    content.innerHTML = html + adminCard;
+  } catch (e) { msg(e.message || String(e), true); }
+}
+
+/* =================== โหมดแอดมิน =================== */
+let adminFilter = 'รออนุมัติ';
+
+function goAdmin(){ setMode('admin'); refreshAdmin(); window.scrollTo(0,0); }
+function goStudent(){ setMode('student'); refresh(); window.scrollTo(0,0); }
+
+async function refreshAdmin(){
+  try {
+    msg('กำลังโหลดคำขอเชื่อมบัญชี...');
+    const data = await api('adminList');
+    renderAdmin(data);
+  } catch (e) {
+    const m = String(e.message || e);
+    if (m.startsWith('NOT_ADMIN:')) {
+      const uid = m.slice('NOT_ADMIN:'.length);
+      msg('บัญชี LINE นี้ยังไม่ได้เป็นแอดมิน', true);
+      content.innerHTML = `<div class="card">
+        <strong>LINE User ID ของคุณ</strong>
+        <div class="uid" id="myUid">${safe(uid)}</div>
+        <button class="btn-green" onclick="copyUid()">คัดลอก User ID</button>
+        <p class="muted">ส่ง User ID นี้ให้ผู้ดูแลระบบ เพื่อเพิ่มใน <b>ADMIN_LINE_IDS</b> ของ Apps Script</p>
+        <button class="btn-light" style="margin-top:8px" onclick="goStudent()">กลับหน้านักศึกษา</button>
+      </div>`;
       return;
     }
+    msg(m, true);
+  }
+}
 
-    msg('สวัสดี ' + (data.name || '') + ' • บัญชีได้รับอนุมัติแล้ว');
-    if (!data.loans.length) { content.innerHTML = '<div class="card">ไม่มีรายการยืมค้างอยู่</div>'; return; }
-
-    content.innerHTML = data.loans.map(l => `
+function renderAdmin(data){
+  const items = data.items || [];
+  const shown = adminFilter === 'all' ? items : items.filter(x => x.status === adminFilter);
+  msg(`🛡️ โหมดแอดมิน • รออนุมัติ ${data.pending || 0} รายการ`);
+  const badge = s => s === 'อนุมัติ' ? '<span class="badge b-ok">อนุมัติแล้ว</span>'
+    : s === 'ปฏิเสธ' ? '<span class="badge b-no">ปฏิเสธ/ยกเลิก</span>'
+    : '<span class="badge b-wait">รออนุมัติ</span>';
+  const actions = x => {
+    const id = safe(x.userId);
+    if (x.status === 'อนุมัติ') return `<div class="btn-row" style="grid-template-columns:1fr"><button data-uid="${id}" data-st="ปฏิเสธ" onclick="setBinding(this)">ยกเลิกการเชื่อม</button></div>`;
+    if (x.status === 'ปฏิเสธ') return `<div class="btn-row" style="grid-template-columns:1fr"><button class="btn-green" data-uid="${id}" data-st="อนุมัติ" onclick="setBinding(this)">อนุมัติ</button></div>`;
+    return `<div class="btn-row">
+      <button class="btn-green" data-uid="${id}" data-st="อนุมัติ" onclick="setBinding(this)">✓ อนุมัติ</button>
+      <button data-uid="${id}" data-st="ปฏิเสธ" onclick="setBinding(this)">✕ ปฏิเสธ</button></div>`;
+  };
+  content.innerHTML = `
+    <div class="tabs">
+      <button class="${adminFilter === 'รออนุมัติ' ? 'on' : ''}" onclick="setAdminFilter('รออนุมัติ')">รออนุมัติ (${data.pending || 0})</button>
+      <button class="${adminFilter === 'all' ? 'on' : ''}" onclick="setAdminFilter('all')">ทั้งหมด (${items.length})</button>
+    </div>
+    ${shown.length ? shown.map(x => `
       <div class="card">
-        <div class="row"><strong>${safe(l.bookId)}</strong><span>${l.overdue ? '🔴 เกินกำหนด' : '🟢 กำลังยืม'}</span></div>
-        <div style="margin:10px 0">${safe(l.title)}</div>
-        <div class="meta">กำหนดคืน: ${safe(l.dueDate)} · ต่ออายุแล้ว ${Number(l.renewCount) || 0} ครั้ง</div>
-        <button data-id="${safe(l.transactionId)}" onclick="renew(this)">ต่ออายุ +7 วัน</button>
-      </div>`).join('');
-  } catch (e) { msg(e.message || String(e), true); }
+        <div class="row"><strong>${safe(x.studentId)}</strong>${badge(x.status)}</div>
+        <div style="margin:8px 0;font-weight:600">${safe(x.name)}</div>
+        <div class="meta">ขอเมื่อ ${safe(x.requestedAt || '-')}${x.approvedAt ? ' · อนุมัติ ' + safe(x.approvedAt) : ''}</div>
+        ${actions(x)}
+      </div>`).join('')
+      : `<div class="card" style="text-align:center">${adminFilter === 'รออนุมัติ' ? 'ไม่มีคำขอที่รออนุมัติ 🎉' : 'ยังไม่มีรายการ'}</div>`}
+    <div class="card"><div class="btn-row">
+      <button class="btn-light" onclick="refreshAdmin()">↻ รีเฟรช</button>
+      <button class="btn-light" onclick="goStudent()">หน้านักศึกษา</button>
+    </div></div>`;
+  window.lastAdminData = data;
+}
+
+function setAdminFilter(f){ adminFilter = f; if (window.lastAdminData) renderAdmin(window.lastAdminData); }
+
+async function setBinding(btn){
+  const status = btn.dataset.st;
+  const q = status === 'อนุมัติ' ? 'อนุมัติให้นักศึกษาคนนี้ใช้งานผ่าน LINE?' : 'ปฏิเสธ/ยกเลิกการเชื่อมบัญชีนี้?';
+  if (!confirm(q)) return;
+  btn.disabled = true;
+  try {
+    const data = await api('adminSet', {userId: btn.dataset.uid, status});
+    renderAdmin(data);
+    alert(data.message);
+  } catch (e) { msg(e.message || String(e), true); btn.disabled = false; }
+}
+
+function copyUid(){
+  const t = document.getElementById('myUid').textContent;
+  (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject())
+    .then(() => alert('คัดลอกแล้ว'))
+    .catch(() => prompt('คัดลอก User ID นี้', t));
 }
 
 async function bind(){
